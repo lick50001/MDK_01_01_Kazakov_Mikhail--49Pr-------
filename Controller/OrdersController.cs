@@ -1,38 +1,47 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using RestApiKazakov.Context;
 using RestApiKazakov.Models;
 using BCrypt.Net;
 
-namespace RestApiKazakov.Controller
+namespace RestApiKazakov.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
     [ApiExplorerSettings(GroupName = "v2")]
     public class OrdersController : ControllerBase
     {
+        // 🔐 Проверка токена
+        private int? ValidateToken(string token, AppDbContext db)
+        {
+            if (string.IsNullOrEmpty(token)) return null;
+            try
+            {
+                var users = db.Users.ToList();
+                var user = users.FirstOrDefault(u => BCrypt.Net.BCrypt.Verify(u.Id.ToString(), token));
+                return user?.Id;
+            }
+            catch { return null; }
+        }
+
         /// <summary>
-        /// Отправка заказа (требуется токен пользователя)
+        /// Отправка заказа (поля: строки с ID и количествами через запятую)
+        /// Пример: DishIds="1,3,5", Counts="2,1,1"
         /// </summary>
-        /// <param name="Token">Токен пользователя (хэшированный Id)</param>
-        /// <param name="MenuId">ID версии меню</param>
-        /// <param name="Items">Список блюд в формате "DishId:Quantity" (например: "1:2,3:1")</param>
-        /// <returns>Подтверждение создания заказа</returns>
-        /// <response code="200">Заказ успешно создан</response>
-        /// <response code="401">Неверный или отсутствующий токен</response>
-        /// <response code="400">Ошибка в данных заказа</response>
-        /// <response code="500">Ошибка сервера</response>
-        [HttpPost]
+        [HttpPost("order")]
         [ProducesResponseType(200)]
         [ProducesResponseType(401)]
         [ProducesResponseType(400)]
         [ProducesResponseType(500)]
-        public async Task<ActionResult> CreateOrderAsync(
-        [FromForm] string Token,
-        [FromForm] int MenuId,
-        [FromForm] string Items)
+        public ActionResult CreateOrder(
+            [FromForm] string Token,
+            [FromForm] string Address,
+            [FromForm] string DishIds, 
+            [FromForm] string Counts)
         {
+            // 🔐 1. Проверка токена
             if (string.IsNullOrEmpty(Token))
                 return StatusCode(401, "Токен не указан");
 
@@ -41,14 +50,10 @@ namespace RestApiKazakov.Controller
             {
                 using (var db = new AppDbContext())
                 {
-                    var allUsers = db.Users.ToList();
-                    var matchedUser = allUsers.FirstOrDefault(u =>
-                        BCrypt.Net.BCrypt.Verify(u.Id.ToString(), Token));
-
-                    if (matchedUser == null)
+                    var userIdValidated = ValidateToken(Token, db);
+                    if (userIdValidated == null)
                         return StatusCode(401, "Неверный токен");
-
-                    userId = matchedUser.Id;
+                    userId = userIdValidated.Value;
                 }
             }
             catch
@@ -56,82 +61,65 @@ namespace RestApiKazakov.Controller
                 return StatusCode(401, "Ошибка проверки токена");
             }
 
-            if (string.IsNullOrEmpty(Items))
-                return BadRequest("Список блюд не указан. Формат: \"1:2,3:1\"");
+            if (string.IsNullOrEmpty(Address))
+                return BadRequest("Адрес не указан");
 
-            var orderItems = new List<(int DishId, int Quantity)>();
+            if (string.IsNullOrEmpty(DishIds) || string.IsNullOrEmpty(Counts))
+                return BadRequest("Не указаны DishIds или Counts");
+
+            int[] dishIdsArray;
+            int[] countsArray;
 
             try
             {
-                var rawItems = Items.Split(',', StringSplitOptions.RemoveEmptyEntries);
-
-                foreach (var item in rawItems)
-                {
-                    var parts = item.Split(':');
-                    if (parts.Length != 2)
-                        return BadRequest($"Неверный формат: \"{item}\". Ожидается \"DishId:Quantity\"");
-
-                    if (!int.TryParse(parts[0], out int dishId) || dishId <= 0)
-                        return BadRequest($"Неверный ID блюда: \"{parts[0]}\"");
-
-                    if (!int.TryParse(parts[1], out int quantity) || quantity <= 0)
-                        return BadRequest($"Неверное количество: \"{parts[1]}\"");
-
-                    orderItems.Add((dishId, quantity));
-                }
-
-                if (orderItems.Count == 0)
-                    return BadRequest("Список блюд пуст");
+                dishIdsArray = DishIds.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                                      .Select(int.Parse).ToArray();
+                countsArray = Counts.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                                    .Select(int.Parse).ToArray();
             }
-            catch (Exception ex)
+            catch
             {
-                return BadRequest($"Ошибка парсинга: {ex.Message}");
+                return BadRequest("Неверный формат данных. Используйте числа, разделенные запятой (например: 1,3,5)");
             }
+
+            if (dishIdsArray.Length != countsArray.Length || dishIdsArray.Length == 0)
+                return BadRequest("Количество ID блюд и количеств должно совпадать и быть больше нуля");
 
             try
             {
                 using (var db = new AppDbContext())
                 {
-                    if (!db.Menus.Any(m => m.Id == MenuId && m.IsActive))
-                        return BadRequest($"Меню с ID {MenuId} не найдено");
-
-                    var dishIds = orderItems.Select(i => i.DishId).ToList();
-
                     var availableDishes = db.Dishes
-                        .Where(d => dishIds.Contains(d.Id))
+                        .Where(d => dishIdsArray.Contains(d.Id))
                         .ToList();
 
-                    foreach (var item in orderItems)
-                    {
-                        var dish = availableDishes.FirstOrDefault(d => d.Id == item.DishId);
-                        if (dish == null)
-                            return BadRequest($"Блюдо с ID {item.DishId} не найдено в базе");
-                        if (dish.MenuId != MenuId)
-                            return BadRequest($"Блюдо с ID {item.DishId} не принадлежит меню {MenuId}");
-                    }
+                    var missingIds = dishIdsArray.Except(availableDishes.Select(d => d.Id)).ToList();
+                    if (missingIds.Any())
+                        return BadRequest($"Блюда с ID не найдены: {string.Join(", ", missingIds)}");
 
                     decimal totalAmount = 0;
-                    foreach (var orderItem in orderItems)
+                    for (int i = 0; i < dishIdsArray.Length; i++)
                     {
-                        var dish = availableDishes.First(d => d.Id == orderItem.DishId);
-                        totalAmount += dish.Price * orderItem.Quantity;
+                        var dish = availableDishes.First(d => d.Id == dishIdsArray[i]);
+                        totalAmount += dish.Price * countsArray[i];
                     }
+
                     var newOrder = new Orders
                     {
                         UserId = userId,
-                        TotalAmount = (double)totalAmount
+                        TotalAmount = totalAmount
                     };
 
                     db.Orders.Add(newOrder);
                     db.SaveChanges();
 
-                    foreach (var item in orderItems)
+                    for (int i = 0; i < dishIdsArray.Length; i++)
                     {
                         db.OrderItems.Add(new OrderItems
                         {
                             OrderId = newOrder.Id,
-                            DishId = item.DishId,
-                            Quantity = item.Quantity
+                            DishId = dishIdsArray[i],
+                            Quantity = countsArray[i]
                         });
                     }
 
@@ -139,9 +127,8 @@ namespace RestApiKazakov.Controller
 
                     return Ok(new
                     {
-                        OrderId = newOrder.Id,
-                        TotalAmount = totalAmount,
-                        Message = "Заказ успешно создан"
+                        message = "Заказ принят",
+                        orderId = newOrder.Id
                     });
                 }
             }
@@ -152,20 +139,14 @@ namespace RestApiKazakov.Controller
         }
 
         /// <summary>
-        /// Получение истории заказов пользователя (требуется токен)
+        /// Получение истории заказов (требуется токен)
         /// </summary>
-        /// <param name="Token">Токен пользователя</param>
-        /// <returns>Список заказов с деталями</returns>
-        /// <response code="200">История получена</response>
-        /// <response code="401">Неверный токен</response>
-        /// <response code="500">Ошибка сервера</response>
         [HttpGet("history")]
         [ProducesResponseType(typeof(object), 200)]
         [ProducesResponseType(401)]
         [ProducesResponseType(500)]
         public ActionResult GetOrderHistory([FromQuery] string Token)
         {
-            // 🔐 Валидация токена (аналогично CreateOrder)
             if (string.IsNullOrEmpty(Token))
                 return StatusCode(401, "Токен не указан");
 
@@ -174,14 +155,10 @@ namespace RestApiKazakov.Controller
             {
                 using (var db = new AppDbContext())
                 {
-                    var allUsers = db.Users.ToList();
-                    var matchedUser = allUsers.FirstOrDefault(u =>
-                        BCrypt.Net.BCrypt.Verify(u.Id.ToString(), Token));
-
-                    if (matchedUser == null)
+                    var userIdValidated = ValidateToken(Token, db);
+                    if (userIdValidated == null)
                         return StatusCode(401, "Неверный токен");
-
-                    userId = matchedUser.Id;
+                    userId = userIdValidated.Value;
                 }
             }
             catch
@@ -195,23 +172,41 @@ namespace RestApiKazakov.Controller
                 {
                     var orders = db.Orders
                         .Where(o => o.UserId == userId)
-                        .Select(o => new
-                        {
-                            o.Id,
-                            o.TotalAmount,
-                            Items = db.OrderItems
-                                .Where(oi => oi.OrderId == o.Id)
-                                .Select(oi => new
-                                {
-                                    DishName = db.Dishes.First(d => d.Id == oi.DishId).Name,
-                                    oi.Quantity,
-                                    Price = db.Dishes.First(d => d.Id == oi.DishId).Price
-                                })
-                                .ToList()
-                        })
-                        .ToList();
+                        .ToList(); 
 
-                    return Ok(orders);
+                    var result = new List<object>();
+
+                    foreach (var order in orders)
+                    {
+                        var orderItems = db.OrderItems
+                            .Where(oi => oi.OrderId == order.Id)
+                            .ToList();
+
+                        var dishesList = new List<object>();
+                        foreach (var item in orderItems)
+                        {
+                            var dish = db.Dishes.FirstOrDefault(d => d.Id == item.DishId);
+                            if (dish != null)
+                            {
+                                dishesList.Add(new
+                                {
+                                    dishId = item.DishId,
+                                    dishName = dish.Name,
+                                    count = item.Quantity,
+                                    price = dish.Price
+                                });
+                            }
+                        }
+
+                        result.Add(new
+                        {
+                            orderId = order.Id,
+                            totalAmount = order.TotalAmount,
+                            dishes = dishesList
+                        });
+                    }
+
+                    return Ok(result);
                 }
             }
             catch (Exception ex)
