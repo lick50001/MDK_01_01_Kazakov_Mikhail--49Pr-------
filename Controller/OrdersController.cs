@@ -5,7 +5,7 @@ using RestApiKazakov.Context;
 using RestApiKazakov.Models;
 using BCrypt.Net;
 
-namespace RestApiKazakov.Controllers
+namespace RestApiKazakov.Controller
 {
     [ApiController]
     [Route("api/[controller]")]

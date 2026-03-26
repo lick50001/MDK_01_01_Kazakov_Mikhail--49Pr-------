@@ -8,6 +8,7 @@ using BCrypt.Net;
 
 namespace RestApiKazakov.Controller
 {
+    [ApiController]
     [Microsoft.AspNetCore.Mvc.Route("api/usersController")]
     [ApiExplorerSettings(GroupName = "v2")]
     public class UsersController : ControllerBase
@@ -15,6 +16,7 @@ namespace RestApiKazakov.Controller
         /// <summary>
         /// Авторизация пользователя
         /// </summary>
+        /// <param name="Email">Логин пользователя</param>
         /// <param name="Login">Логин пользователя</param>
         /// <param name="Password">Пароль пользователя</param>
         /// <returns>Данный метод преднозначен для авторизации пользователя на сайте</returns>
@@ -28,19 +30,19 @@ namespace RestApiKazakov.Controller
         [ProducesResponseType(401)]
         [ProducesResponseType(500)]
 
-        public ActionResult SignIn([FromForm] string Login, [FromForm] string Password)
+        public ActionResult SignIn([FromForm] string Email, [FromForm] string Password)
         {
-            if (Login == null || Password == null)
+            if (Email == null || Password == null)
                 return StatusCode(403);
 
             try
             {
                 using (var db = new AppDbContext())
                 {
-                    var user = db.Users.FirstOrDefault(x => x.Username == Login);
+                    var user = db.Users.FirstOrDefault(x => x.Email == Email);
 
                     if (user == null || !BCrypt.Net.BCrypt.Verify(Password, user.PasswordHash))
-                        return StatusCode(401, "Неверный логин или пароль");
+                        return StatusCode(401, "Неверная почта или пароль");
 
                     var token = BCrypt.Net.BCrypt.HashPassword(user.Id.ToString());
                     return Ok(new { user.Id, Token = token });
@@ -53,22 +55,23 @@ namespace RestApiKazakov.Controller
         }
 
         [HttpPost("RegIn")]
-        public ActionResult RegIn([FromForm] string Login, [FromForm] string Password)
+        public ActionResult RegIn([FromForm] string Email, [FromForm] string Login, [FromForm] string Password)
         {
-            if (Login == null || Password == null)
+            if (Email == null || Login == null || Password == null)
                 return StatusCode(403);
 
             try
             {
                 using (var db = new AppDbContext())
                 {
-                    if (db.Users.Any(u => u.Username == Login))
+                    if (db.Users.Any(u => u.Username == Login || u.Email == Email))
                     {
-                        return BadRequest("Пользователь с таким логином уже существует");
+                        return BadRequest("Пользователь с таким логином или почтой уже существует");
                     }
 
                     var newUser = new Users
                     {
+                        Email = Email,
                         Username = Login,
                         PasswordHash = BCrypt.Net.BCrypt.HashPassword(Password),
                     };
